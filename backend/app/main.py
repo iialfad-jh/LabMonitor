@@ -11,8 +11,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import psutil
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from .occupancy import OccupancyManager
 
 NVIDIA_TIMEOUT_SECONDS = 4
 GPU_FIELDS = [
@@ -33,7 +36,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins or ["*"],
     allow_credentials=False,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -148,6 +151,37 @@ def _gpu_snapshot() -> Dict[str, Any]:
     return {"available": True, "gpus": gpus, "error": process_error}
 
 
+occupancy_manager = OccupancyManager(_gpu_snapshot)
+
+
+class OccupancyStartRequest(BaseModel):
+    gpu_index: int = Field(ge=0, le=255)
+    gb: float = Field(gt=0, le=10000)
+
+
+@app.get("/api/occupancy")
+def occupancy_status() -> Dict[str, Any]:
+    return {"items": occupancy_manager.status(), "safety_gb": occupancy_manager.safety_gb}
+
+
+@app.post("/api/occupancy")
+def occupancy_start(request: OccupancyStartRequest) -> Dict[str, Any]:
+    try:
+        return {"item": occupancy_manager.start(request.gpu_index, request.gb), "safety_gb": occupancy_manager.safety_gb}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.delete("/api/occupancy/{gpu_index}")
+def occupancy_stop(gpu_index: int) -> Dict[str, Any]:
+    try:
+        return {"item": occupancy_manager.stop(gpu_index)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 def _disk_snapshot() -> List[Dict[str, Any]]:
     disks = []
     seen = set()
@@ -247,4 +281,5 @@ def metrics() -> Dict[str, Any]:
         "idle_gpu_count": idle_count if gpu_data["available"] else None,
         "gpus": gpus,
         "errors": errors,
+        "occupancy": occupancy_manager.status(),
     }

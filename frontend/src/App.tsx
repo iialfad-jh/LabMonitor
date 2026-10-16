@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { GpuTrend, HISTORY_WINDOW_MS, REFRESH_MS, type GpuHistoryPoint } from './components/GpuTrend'
+import { GpuAlert } from './components/GpuAlert'
+import { GpuOccupy, type OccupancyItem } from './components/GpuOccupy'
 import {
   Activity,
   ArrowDownToLine,
   Check,
-  ChevronDown,
   Clock3,
   Cpu,
   Database,
@@ -33,12 +35,6 @@ type GPU = {
   processes: ProcessInfo[]
   processes_available: boolean
 }
-type GpuHistoryPoint = {
-  at: number
-  utilization: number | null
-  memoryUsedMb: number | null
-  memoryTotalMb: number | null
-}
 type Disk = {
   device: string
   mountpoint: string
@@ -62,10 +58,9 @@ type Metrics = {
   idle_gpu_count: number | null
   gpus: GPU[]
   errors: Record<string, string>
+  occupancy: OccupancyItem[]
 }
 
-const REFRESH_MS = 3000
-const HISTORY_WINDOW_MS = 30 * 1000
 const formatPercent = (value: number | null | undefined) => value == null ? '不可用' : `${Math.round(value)}%`
 const formatBytes = (value: number | null | undefined) => {
   if (value == null) return '不可用'
@@ -85,93 +80,6 @@ const formatUptime = (seconds: number | null) => {
 }
 const localTime = (date: string | null) => date ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(date)) : '等待连接'
 const percentWidth = (value: number | null | undefined) => value == null ? '0%' : `${Math.min(100, Math.max(0, value))}%`
-const formatChartTime = (timestamp: number) => new Intl.DateTimeFormat('zh-CN', {
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-  hour12: false,
-}).format(new Date(timestamp))
-const formatChartMemory = (value: number | null) => value == null ? '不可用' : `${(value / 1024).toFixed(0)} GB`
-
-function trendPath(points: GpuHistoryPoint[], key: 'utilization' | 'memoryUsedMb', startAt: number, endAt: number, maxValue: number) {
-  if (!points.length || endAt <= startAt) return ''
-  const segments: Array<Array<{ x: number; y: number }>> = []
-  let segment: Array<{ x: number; y: number }> = []
-  points.forEach((point) => {
-    const value = point[key]
-    if (value == null) {
-      if (segment.length) segments.push(segment)
-      segment = []
-      return
-    }
-    const x = 7 + ((point.at - startAt) / (endAt - startAt)) * 286
-    const y = 82 - (Math.min(maxValue, Math.max(0, value)) / maxValue) * 68
-    segment.push({ x: Math.min(293, Math.max(7, x)), y })
-  })
-  if (segment.length) segments.push(segment)
-
-  return segments.map((current) => {
-    if (current.length === 1) return `M ${current[0].x.toFixed(1)},${current[0].y.toFixed(1)}`
-    let path = `M ${current[0].x.toFixed(1)},${current[0].y.toFixed(1)}`
-    for (let index = 0; index < current.length - 1; index += 1) {
-      const previous = current[index - 1] ?? current[index]
-      const from = current[index]
-      const to = current[index + 1]
-      const next = current[index + 2] ?? to
-      const controlOne = {
-        x: from.x + (to.x - previous.x) / 6,
-        y: Math.min(82, Math.max(14, from.y + (to.y - previous.y) / 6)),
-      }
-      const controlTwo = {
-        x: to.x - (next.x - from.x) / 6,
-        y: Math.min(82, Math.max(14, to.y - (next.y - from.y) / 6)),
-      }
-      path += ` C ${controlOne.x.toFixed(1)},${controlOne.y.toFixed(1)} ${controlTwo.x.toFixed(1)},${controlTwo.y.toFixed(1)} ${to.x.toFixed(1)},${to.y.toFixed(1)}`
-    }
-    return path
-  }).join(' ')
-}
-
-function GpuTrend({ points }: { points: GpuHistoryPoint[] }) {
-  const latestAt = points[points.length - 1]?.at ?? Date.now()
-  const startAt = latestAt - HISTORY_WINDOW_MS
-  const memoryMax = Math.max(...points.map((point) => point.memoryTotalMb ?? point.memoryUsedMb ?? 0), 1)
-  const utilizationPath = trendPath(points, 'utilization', startAt, latestAt, 100)
-  const memoryPath = trendPath(points, 'memoryUsedMb', startAt, latestAt, memoryMax)
-  const latestPoint = points[points.length - 1]
-  const latestUtilizationY = latestPoint?.utilization == null ? null : 82 - (Math.min(100, Math.max(0, latestPoint.utilization)) / 100) * 68
-  const latestMemoryY = latestPoint?.memoryUsedMb == null ? null : 82 - (Math.min(memoryMax, Math.max(0, latestPoint.memoryUsedMb)) / memoryMax) * 68
-  return <div className="gpu-trend" aria-label="最近三十秒 GPU 利用率与显存趋势">
-    <div className="trend-head"><span>实时趋势 · 最近 30 秒</span><span className="trend-legends"><i className="trend-legend utilization" />利用率 <i className="trend-legend memory" />显存</span></div>
-    <div className="trend-chart-shell">
-      <div className="trend-y-axis utilization-axis"><span>100%</span><span>50%</span><span>0%</span></div>
-      <div className="trend-plot">
-        <svg viewBox="0 0 300 92" preserveAspectRatio="none" aria-hidden="true">
-          <line x1="7" y1="14" x2="293" y2="14" /><line x1="7" y1="48" x2="293" y2="48" /><line x1="7" y1="82" x2="293" y2="82" />
-          <path className="trend-path utilization" d={utilizationPath} /><path className="trend-path memory" d={memoryPath} />
-          {latestUtilizationY != null && <circle className="trend-point utilization" cx="293" cy={latestUtilizationY} r="2.5" />}
-          {latestMemoryY != null && <circle className="trend-point memory" cx="293" cy={latestMemoryY} r="2.5" />}
-        </svg>
-      </div>
-      <div className="trend-y-axis memory-axis"><span>{formatChartMemory(memoryMax)}</span><span>{formatChartMemory(memoryMax / 2)}</span><span>0 GB</span></div>
-    </div>
-    <div className="trend-x-axis"><span>{formatChartTime(startAt)}</span><span>{formatChartTime(startAt + HISTORY_WINDOW_MS / 2)}</span><span>{formatChartTime(latestAt)}</span></div>
-  </div>
-}
-
-function Ring({ value, color, size = 92 }: { value: number | null; color: string; size?: number }) {
-  const radius = 38
-  const circumference = 2 * Math.PI * radius
-  const safeValue = value == null ? 0 : Math.min(100, Math.max(0, value))
-  return <div className="ring" style={{ width: size, height: size, color }}>
-    <svg viewBox="0 0 100 100" aria-hidden="true">
-      <circle className="ring-track" cx="50" cy="50" r={radius} />
-      <circle className="ring-value" cx="50" cy="50" r={radius} style={{ strokeDasharray: circumference, strokeDashoffset: circumference * (1 - safeValue / 100) }} />
-    </svg>
-    <span className="ring-label">{formatPercent(value)}</span>
-  </div>
-}
-
 function Meter({ value, color = 'blue' }: { value: number | null; color?: string }) {
   return <div className={`meter meter-${color}`}><span style={{ width: percentWidth(value) }} /></div>
 }
@@ -197,7 +105,7 @@ function App() {
       if (!response.ok) throw new Error(`服务器返回错误 (${response.status})`)
       const data = await response.json() as Metrics
       setMetrics(data)
-      const sampleTime = Number.isNaN(Date.parse(data.collected_at)) ? Date.now() : Date.parse(data.collected_at)
+      const sampleTime = performance.now()
       setGpuHistory((current) => {
         const next = { ...current }
         data.gpus.forEach((gpu) => {
@@ -208,9 +116,12 @@ function App() {
             memoryUsedMb: gpu.memory_used_mb,
             memoryTotalMb: gpu.memory_total_mb,
           }
-          const withoutDuplicate = previous[previous.length - 1]?.at === sampleTime ? previous.slice(0, -1) : previous
+          const history = [...previous, point]
           const cutoff = sampleTime - HISTORY_WINDOW_MS
-          next[gpu.index] = [...withoutDuplicate, point].filter((item) => item.at >= cutoff)
+          const firstVisible = history.findIndex((item) => item.at >= cutoff)
+          // Keep one preceding sample so the line crosses the clipping edge
+          // continuously instead of losing an entire segment at each refresh.
+          next[gpu.index] = history.slice(Math.max(0, firstVisible - 1))
         })
         return next
       })
@@ -229,12 +140,20 @@ function App() {
   useEffect(() => {
     let canceled = false
     let timer = 0
+    let nextPollAt = performance.now()
     const poll = async () => {
       await refresh()
-      if (!canceled) timer = window.setTimeout(poll, REFRESH_MS)
+      if (canceled) return
+      nextPollAt += REFRESH_MS
+      const now = performance.now()
+      while (nextPollAt <= now) nextPollAt += REFRESH_MS
+      timer = window.setTimeout(poll, nextPollAt - now)
     }
     void poll()
-    return () => { canceled = true; window.clearTimeout(timer) }
+    return () => {
+      canceled = true
+      window.clearTimeout(timer)
+    }
   }, [refresh])
 
   useEffect(() => {
@@ -284,42 +203,34 @@ function App() {
     </header>
 
     <section className="intro" id="top">
-      <div><p className="eyebrow"><span className="eyebrow-line" />LIVE SYSTEM OVERVIEW</p><h1>服务器概览<span className="title-period">.</span></h1><p className="intro-copy">一览系统状态与 GPU 资源，保持每一刻都在掌握之中。</p></div>
+      <div className="intro-heading"><p className="eyebrow"><span className="eyebrow-line" />LIVE SYSTEM OVERVIEW</p><h1>服务器概览<span className="title-period">.</span></h1></div>
+      <div className="overview-icons" role="group" aria-label="系统资源总览">
+        <span className="glass overview-icon cpu-icon" tabIndex={0} role="img" aria-label={`CPU 使用率 ${formatPercent(metrics?.cpu.usage_percent)}，${metrics?.cpu.logical_cores ?? '不可用'} 个逻辑核心，${metrics?.cpu.physical_cores ?? '不可用'} 个物理核心`}>
+          <Cpu size={19} />
+          <span className="overview-tooltip"><strong>CPU · {formatPercent(metrics?.cpu.usage_percent)}</strong>逻辑 {metrics?.cpu.logical_cores ?? '不可用'} 核 · 物理 {metrics?.cpu.physical_cores ?? '不可用'} 核</span>
+        </span>
+        <span className="glass overview-icon memory-icon" tabIndex={0} role="img" aria-label={`内存使用率 ${formatPercent(metrics?.memory.usage_percent)}，已用 ${formatBytes(metrics?.memory.used_bytes)}`}>
+          <MemoryStick size={19} />
+          <span className="overview-tooltip"><strong>内存 · {formatPercent(metrics?.memory.usage_percent)}</strong>已用 {formatBytes(metrics?.memory.used_bytes)} / {formatBytes(metrics?.memory.total_bytes)}<br />可用 {formatBytes(metrics?.memory.available_bytes)}</span>
+        </span>
+        <label className="glass overview-icon disk-icon" aria-label={`磁盘 ${disk?.mountpoint ?? '不可用'}，使用率 ${formatPercent(disk?.usage_percent)}`}>
+          <HardDrive size={19} />
+          {metrics?.disks.length ? <select className="overview-disk-select" value={selectedDisk} onChange={(event) => setSelectedDisk(Number(event.target.value))} aria-label="选择磁盘挂载点">{metrics.disks.map((item, index) => <option value={index} key={`${item.mountpoint}-${index}`}>{item.mountpoint}</option>)}</select> : null}
+          <span className="overview-tooltip"><strong>磁盘 {disk?.mountpoint ?? ''}</strong>{formatPercent(disk?.usage_percent)} · {formatBytes(disk?.used_bytes)} / {formatBytes(disk?.total_bytes)}</span>
+        </label>
+        <span className="glass overview-icon gpu-icon" tabIndex={0} role="img" aria-label={`${gpuCount ?? '不可用'} 张 GPU，平均利用率 ${formatPercent(avgGpu)}`}>
+          <Zap size={19} />
+          <span className="overview-tooltip"><strong>GPU</strong>{gpuCount ?? '不可用'} 张 · {metrics?.idle_gpu_count ?? '—'} 张空闲 · 平均 {formatPercent(avgGpu)}</span>
+        </span>
+      </div>
       <div className="uptime-chip glass"><span className="uptime-icon"><Clock3 size={17} /></span><span><small>系统运行时间</small><strong>{formatUptime(metrics?.system_uptime_seconds ?? null)}</strong></span></div>
     </section>
 
+    <GpuAlert snapshot={metrics} connected={serverOnline} onInspect={(index) => setSelectedGpu(metrics?.gpus.find((gpu) => gpu.index === index) ?? null)} />
+    <GpuOccupy snapshot={metrics} onRefresh={() => refresh(true)} />
+
     {fetchError && <div className="connection-alert"><span className="alert-icon">!</span><span>暂时无法连接监控服务：{fetchError}</span><button onClick={() => void refresh(true)}>重试</button></div>}
     {metrics && Object.entries(metrics.errors).map(([key, message]) => <div className="inline-alert" key={key}><span className="alert-icon">!</span><span>{message}</span></div>)}
-
-    <section className="overview-grid" aria-label="系统资源总览">
-      <article className="glass overview-card cpu-card">
-        <div className="card-topline"><span className="resource-icon cpu-icon"><Cpu size={19} /></span><span className="card-kicker">PROCESSOR</span><span className="soft-badge">CPU</span></div>
-        <div className="metric-main"><div><p className="metric-title">处理器</p><strong className="big-value">{formatPercent(metrics?.cpu.usage_percent)}</strong></div><Ring value={metrics?.cpu.usage_percent ?? null} color="var(--blue)" /></div>
-        <div className="metric-footer"><span>逻辑核心</span><strong>{metrics?.cpu.logical_cores ?? '不可用'} <small>核</small></strong><span className="footer-divider" /><span>物理核心</span><strong>{metrics?.cpu.physical_cores ?? '不可用'} <small>核</small></strong></div>
-      </article>
-
-      <article className="glass overview-card memory-card">
-        <div className="card-topline"><span className="resource-icon memory-icon"><MemoryStick size={19} /></span><span className="card-kicker">MEMORY</span><span className="soft-badge">RAM</span></div>
-        <div className="memory-head"><div><p className="metric-title">内存</p><strong className="big-value">{formatPercent(metrics?.memory.usage_percent)}</strong></div><span className="memory-total">共 {formatBytes(metrics?.memory.total_bytes)}</span></div>
-        <div className="memory-track"><div className="memory-fill" style={{ width: percentWidth(metrics?.memory.usage_percent ?? null) }} /></div>
-        <div className="memory-foot"><span><i className="legend-dot used" />已用 <strong>{formatBytes(metrics?.memory.used_bytes)}</strong></span><span><i className="legend-dot free" />可用 <strong>{formatBytes(metrics?.memory.available_bytes)}</strong></span></div>
-      </article>
-
-      <article className="glass overview-card disk-card">
-        <div className="card-topline"><span className="resource-icon disk-icon"><HardDrive size={19} /></span><span className="card-kicker">STORAGE</span><span className="soft-badge">DISK</span></div>
-        <div className="disk-head"><div><p className="metric-title">磁盘空间</p><strong className="big-value disk-value">{formatPercent(disk?.usage_percent)}</strong></div>
-          {metrics?.disks.length ? <label className="disk-select-wrap"><select className="disk-select" value={selectedDisk} onChange={(event) => setSelectedDisk(Number(event.target.value))} aria-label="选择磁盘挂载点">{metrics.disks.map((item, index) => <option value={index} key={`${item.mountpoint}-${index}`}>{item.mountpoint}</option>)}</select><ChevronDown size={13} /></label> : <span className="disk-select placeholder-select">无挂载点</span>}
-        </div>
-        <Meter value={disk?.usage_percent ?? null} color="green" />
-        <div className="disk-foot"><span>已用 <strong>{formatBytes(disk?.used_bytes)}</strong></span><span>总量 <strong>{formatBytes(disk?.total_bytes)}</strong></span></div>
-      </article>
-
-      <article className="glass overview-card gpu-overview-card">
-        <div className="card-topline"><span className="resource-icon gpu-icon"><Zap size={19} /></span><span className="card-kicker">ACCELERATOR</span><span className="soft-badge">GPU</span></div>
-        <div className="gpu-summary"><div><p className="metric-title">图形处理器</p><strong className="big-value">{gpuCount == null ? '不可用' : gpuCount}<small>{gpuCount == null ? '' : ' 张'}</small></strong></div><div className="gpu-idle"><span className="idle-number">{metrics?.idle_gpu_count ?? '—'}</span><span>空闲</span></div></div>
-        <div className="gpu-summary-foot"><span><i className="legend-dot gpu-legend" /> GPU 平均负载</span><strong>{formatPercent(avgGpu)}</strong></div>
-      </article>
-    </section>
 
     <section className="gpu-section" aria-label="GPU 实时监控">
       <div className="section-heading"><div><p className="eyebrow"><span className="eyebrow-line" />HARDWARE</p><h2>GPU 实时监控</h2></div><span className="section-count">{gpuCount == null ? '数据不可用' : `${gpuCount} 张设备`}<span className="count-indicator" /></span></div>
@@ -334,7 +245,7 @@ function App() {
       </div> : <div className="glass gpu-unavailable"><span className="unavailable-icon"><Database size={22} /></span><div><strong>{loading ? '正在读取 GPU 设备…' : 'GPU 数据不可用'}</strong><p>{metrics?.errors.gpus ?? (fetchError ? '请确认监控服务正在运行，然后重试。' : '当前服务器未检测到可用 GPU 设备。')}</p></div></div>}
     </section>
 
-    <footer className="page-footer"><span><Server size={13} /> {metrics?.hostname ?? 'LabMonitor'}</span><span>自动刷新 · 每 3 秒</span><span>{metrics?.platform?.split(' ')[0] ?? 'Linux'} <i className="footer-separator">·</i> LabMonitor</span></footer>
+    <footer className="page-footer"><span><Server size={13} /> {metrics?.hostname ?? 'LabMonitor'}</span><span>{metrics?.platform?.split(' ')[0] ?? 'Linux'} <i className="footer-separator">·</i> LabMonitor</span></footer>
 
     {selectedGpu && <div className="modal-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedGpu(null) }}>
       <section className="glass gpu-detail" role="dialog" aria-modal="true" aria-labelledby="gpu-detail-title">
